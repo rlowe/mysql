@@ -50,6 +50,16 @@ type config struct {
 	clientFoundRows         bool
 	columnsWithAlias        bool
 	interpolateParams       bool
+        cnf_host                string
+        cnf_port                uint64
+        cnf_user                string
+        cnf_passwd              string
+        cnf_ssl_ca              string
+        cnf_ssl_capath          string
+        cnf_ssl_cert            string
+        cnf_ssl_cipher          string
+        cnf_ssl_key             string
+        socket                  string
 }
 
 // Handles parameters set in DSN after the connection is established

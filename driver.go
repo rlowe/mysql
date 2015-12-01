@@ -17,8 +17,12 @@
 package mysql
 
 import (
+        "crypto/tls"
+        "crypto/x509"
 	"database/sql"
 	"database/sql/driver"
+        "errors"
+        "io/ioutil"
 	"net"
 )
 
@@ -42,6 +46,29 @@ func RegisterDial(net string, dial DialFunc) {
 	dials[net] = dial
 }
 
+func setupTLS(cfg *config) (tlscfg *tls.Config, err error) {
+  rootCertPool := x509.NewCertPool()
+  pem, err := ioutil.ReadFile(cfg.cnf_ssl_ca)
+  if err != nil {
+      return
+  }
+  if ok := rootCertPool.AppendCertsFromPEM(pem); !ok {
+      return nil, errors.New("Couldn't append certs")
+  }
+  clientCert := make([]tls.Certificate, 0, 1)
+  certs, err := tls.LoadX509KeyPair(cfg.cnf_ssl_cert, cfg.cnf_ssl_key)
+  if err != nil {
+      return
+  }
+  clientCert = append(clientCert, certs)
+  tlscfg = &tls.Config{
+      RootCAs: rootCertPool,
+      Certificates: clientCert,
+  }
+
+  return
+}
+
 // Open new Connection.
 // See https://github.com/go-sql-driver/mysql#dsn-data-source-name for how
 // the DSN string is formated
@@ -57,6 +84,19 @@ func (d MySQLDriver) Open(dsn string) (driver.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+
+        // Set up TLS handler, if specified by DSN or cnf files
+        if mc.cfg.cnf_ssl_ca != "" {
+                tlscfg, err := setupTLS(mc.cfg)
+                if err != nil {
+                        return nil, err
+                }
+
+                // If no TLS config was specified by DSN, use it
+                if (mc.cfg.tls == nil) && (tlscfg != nil) {
+                        mc.cfg.tls = tlscfg
+                }
+        }
 
 	// Connect to Server
 	if dial, ok := dials[mc.cfg.net]; ok {

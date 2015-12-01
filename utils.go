@@ -18,8 +18,13 @@ import (
 	"io"
 	"net"
 	"net/url"
+        "os"
+        "runtime"
+        "strconv"
 	"strings"
 	"time"
+
+        "gopkg.in/ini.v1"
 )
 
 var (
@@ -80,7 +85,7 @@ func parseDSN(dsn string) (cfg *config, err error) {
 		collation: defaultCollation,
 	}
 
-	// [user[:password]@][net[(addr)]]/dbname[?param1=value1&paramN=valueN]
+        // [user[:password]@][net[(addr)]]/dbname[?param1=value1&paramN=valueN]
 	// Find the last '/' (since the password or the net addr might contain a '/')
 	foundSlash := false
 	for i := len(dsn) - 1; i >= 0; i-- {
@@ -142,6 +147,32 @@ func parseDSN(dsn string) (cfg *config, err error) {
 		}
 	}
 
+        // Go through the standard option files and fill in any blanks
+        cfg_files := [6]string {"","","","","",""}
+
+        if runtime.GOOS == "windows" {
+                // Not yet implemented
+                cfg_files = [6]string {}
+        } else {
+                // http://dev.mysql.com/doc/refman/5.7/en/option-files.html
+                cfg_files = [6]string {
+                         "/etc/my.cnf",
+                         "/etc/mysql/my.cnf",
+                         // SYSCONFDIR/my.cnf - Ignored because we can't guarantee that we'll get the info
+                         os.Getenv("MYSQL_HOME")+"/my.cnf",
+                         // defaults-extra-file if ever implemented
+                         os.Getenv("HOME")+"/.my.cnf",
+                         os.Getenv("HOME")+"/.mylogin.cnf",
+                 }
+        }
+
+        for i := range cfg_files {
+                if _, err := os.Stat(cfg_files[i]); err == nil && cfg_files[i] != "" {
+                        setLoginOptionFileValues(cfg_files[i], "client", cfg)
+                        setOptionFileParams(cfg_files[i], "client", cfg) 
+                }
+        }
+
 	if !foundSlash && len(dsn) > 0 {
 		return nil, errInvalidDSNNoSlash
 	}
@@ -159,9 +190,25 @@ func parseDSN(dsn string) (cfg *config, err error) {
 	if cfg.addr == "" {
 		switch cfg.net {
 		case "tcp":
-			cfg.addr = "127.0.0.1:3306"
+                        if cfg.cnf_host != "" {
+                                if cfg.cnf_port != 0 {
+                                        cfg.addr = cfg.cnf_host + ":" + strconv.FormatUint(cfg.cnf_port, 10)
+                                } else {
+                                        cfg.addr = cfg.cnf_host + ":3306"
+                                }
+                        } else {
+                                if cfg.cnf_port != 0 {
+                  	                cfg.addr = "127.0.0.1:" + strconv.FormatUint(cfg.cnf_port, 10)
+                                } else {
+                                        cfg.addr = "127.0.0.1:3306"
+                                }
+                        }
 		case "unix":
-			cfg.addr = "/tmp/mysql.sock"
+                        if cfg.socket != "" {
+        cfg.addr = cfg.socket
+      } else {
+			  cfg.addr = "/tmp/mysql.sock"
+      }
 		default:
 			return nil, errors.New("Default addr for network '" + cfg.net + "' unknown")
 		}
@@ -970,4 +1017,66 @@ func escapeStringQuotes(buf []byte, v string) []byte {
 	}
 
 	return buf[:pos]
+}
+
+// Set MySQL Login Options based on option file
+// Do NOT override specific options in the DSN
+func setLoginOptionFileValues(defaultsFile string, defaultsGroup string, cfg *config){
+  cnf, err := ini.Load(defaultsFile)
+  if err != nil {
+  }
+
+  if cfg.user == "" {
+    cfg.user = cnf.Section(defaultsGroup).Key("user").String()
+  }
+
+  if cfg.passwd == "" {
+    cfg.passwd = cnf.Section(defaultsGroup).Key("password").String()
+  }
+  cfg.socket   = cnf.Section(defaultsGroup).Key("socket").String()
+  cfg.cnf_host = cnf.Section(defaultsGroup).Key("host").String()
+  cfg.cnf_port, err = strconv.ParseUint(cnf.Section(defaultsGroup).Key("port").String(),10,64)
+
+  if err != nil {
+    cfg.cnf_port = 3306
+  }
+
+  cfg.cnf_user = cnf.Section(defaultsGroup).Key("user").String()
+  cfg.cnf_passwd = cnf.Section(defaultsGroup).Key("password").String()
+  cfg.cnf_ssl_ca = cnf.Section(defaultsGroup).Key("ssl_ca").String()
+  cfg.cnf_ssl_capath = cnf.Section(defaultsGroup).Key("ssl_capath").String()
+  cfg.cnf_ssl_cert = cnf.Section(defaultsGroup).Key("ssl_cert").String()
+  cfg.cnf_ssl_cipher = cnf.Section(defaultsGroup).Key("ssl_cipher").String()
+  cfg.cnf_ssl_key = cnf.Section(defaultsGroup).Key("ssl_key").String()
+}
+
+func setOptionFileParams(defaultsFile string, defaultsGroup string, cfg *config) {
+  cnf, err := ini.Load(defaultsFile)
+  if err != nil {
+  }
+
+  // Load everything except:
+  // user password database port socket
+  keys := cnf.Section(defaultsGroup).KeyStrings() 
+  for _, key := range keys {
+    if key != "host" && key != "user" && key != "password" && key != "database" && key != "port" && key != "socket" {
+      // Make sure it's not already set
+      // (i.e. never override things explicitly in the DSN)
+      newparam := true
+      for param, _ := range cfg.params {
+        if param == key {
+          newparam = false 
+        }
+      }
+
+      if newparam == true {
+        if cfg.params == nil {
+          cfg.params = make(map[string]string)
+        }
+        cfg.params[key] = cnf.Section(defaultsGroup).Key(key).String();
+      }
+    }
+  }
+
+  return
 }
